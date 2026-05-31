@@ -41,6 +41,34 @@ Open in browser:
 http://localhost:8080
 ```
 
+
+## Cloud Hosting
+
+The app reads the hosting port automatically from `PORT`, `SERVER_PORT`, or `P_SERVER_PORT`.
+
+For panel hosting with a fixed port like `2001`, set the startup command to:
+
+```bash
+PORT=2001 python app.py
+```
+
+For production hosting, use Gunicorn:
+
+```bash
+gunicorn -w 2 --threads 4 -b 0.0.0.0:$PORT app:app
+```
+
+If your panel does not provide `$PORT`, replace it with the panel port:
+
+```bash
+gunicorn -w 2 --threads 4 -b 0.0.0.0:2001 app:app
+```
+
+Health check:
+
+```text
+/health
+```
 ## Assets CDN
 
 Item PNG assets are loaded from:

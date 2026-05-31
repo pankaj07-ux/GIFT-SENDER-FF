@@ -14,7 +14,7 @@ import GetWallet_pb2
 import SendGift_pb2
 
 load_dotenv()
-IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL")
+IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "https://cdn.jsdelivr.net/gh/pankaj07-ux/GIFT-ITEM-ASSETS@main/PNG/").rstrip("/") + "/"
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -60,6 +60,10 @@ def decode_jwt(token):
         return dec.get("lock_region"), dec.get("external_id")
     except (IndexError, ValueError, json.JSONDecodeError):
         return None, None
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok'}), 200
 
 @app.route('/favicon.ico')
 def favicon():
@@ -193,4 +197,5 @@ def send_gift():
     except Exception as e: return jsonify({"success": False, "message": str(e)})
 
 if __name__ == '__main__':
-    app.run(port=8080, threaded=True)
+    port = int(os.environ.get('PORT') or os.environ.get('SERVER_PORT') or os.environ.get('P_SERVER_PORT') or 8080)
+    app.run(host='0.0.0.0', port=port, threaded=True)
