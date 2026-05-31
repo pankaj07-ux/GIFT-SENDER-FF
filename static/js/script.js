@@ -48,7 +48,7 @@ async function fetchAndRenderItems(refreshCats = false) {
                 const card = `
                     <div class="card">
                         <div class="sort-badge">${item.category}</div>
-                        <div class="card-img-container"><img src="/api/image/${item.item_id}" class="card-img"></div>
+                        <div class="card-img-container"><img src="/api/image/${item.item_id}" class="card-img" loading="lazy" decoding="async"></div>
                         <div class="price">${item.price_str}</div>
                         <div class="expire">Expires:<br>${item.expire_date}</div>
                         <button class="btn-send" onclick="openGiftModal('${item.commodity_id}', '${purePrice}', '${cType}')">SEND</button>

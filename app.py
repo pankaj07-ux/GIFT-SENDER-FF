@@ -1,10 +1,12 @@
 import os, requests, json, base64, urllib3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response
 from dotenv import load_dotenv
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToDict
+from requests.adapters import HTTPAdapter
 
 # Compiled Protos
 import GetGiftStoreDetails_pb2
@@ -32,6 +34,14 @@ PREFIX_MAP = {
 }
 
 STORE_CACHE = {}
+IMAGE_CACHE = {}
+MAX_IMAGE_CACHE_ITEMS = 500
+
+HTTP = requests.Session()
+HTTP.mount("https://", HTTPAdapter(pool_connections=20, pool_maxsize=50))
+HTTP.mount("http://", HTTPAdapter(pool_connections=20, pool_maxsize=50))
+
+EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 def encrypt_payload(data):
     cipher = AES.new(KEY, AES.MODE_CBC, IV)
@@ -45,16 +55,25 @@ def get_server_url(region):
 def decode_jwt(token):
     try:
         p = token.split('.')[1]
-        p += '=' * (4 - len(p) % 4)
-        dec = json.loads(base64.b64decode(p))
+        p += '=' * (-len(p) % 4)
+        dec = json.loads(base64.urlsafe_b64decode(p))
         return dec.get("lock_region"), dec.get("external_id")
-    except: return None, None
+    except (IndexError, ValueError, json.JSONDecodeError):
+        return None, None
+
+@app.route('/favicon.ico')
+def favicon():
+    return Response(status=204)
+
+@app.route('/.well-known/appspecific/com.chrome.devtools.json')
+def chrome_devtools_config():
+    return jsonify({}), 200
 
 def get_wallet_data(jwt, login_token, region):
     req = GetWallet_pb2.CSGetWalletReq(login_token=login_token, topup_rebate=False)
     headers = {"Authorization": f"Bearer {jwt}", "X-GA": "v1 1", "ReleaseVersion": "OB53", "Content-Type": "application/octet-stream", "User-Agent": USER_AGENT}
     try:
-        r = requests.post(f"{get_server_url(region)}/GetWallet", data=encrypt_payload(req.SerializeToString()), headers=headers, verify=False, timeout=10)
+        r = HTTP.post(f"{get_server_url(region)}/GetWallet", data=encrypt_payload(req.SerializeToString()), headers=headers, verify=False, timeout=(3, 8))
         if r.status_code == 200:
             res_pb = GetWallet_pb2.CSGetWalletRes()
             res_pb.ParseFromString(r.content)
@@ -64,16 +83,30 @@ def get_wallet_data(jwt, login_token, region):
     except: pass
     return {"gold": 0, "diamond": 0, "last_topup": "Error"}
 
+def wallet_result_or_default(wallet_future):
+    try:
+        return wallet_future.result(timeout=9)
+    except Exception:
+        return {"gold": 0, "diamond": 0, "last_topup": "Error"}
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/api/image/<item_id>')
 def serve_image(item_id):
+    if item_id in IMAGE_CACHE:
+        return Response(IMAGE_CACHE[item_id], mimetype='image/png', headers={"Cache-Control": "public, max-age=86400"})
+
     try:
-        r = requests.get(f"{IMAGE_BASE_URL}{item_id}.png", timeout=5)
-        return Response(r.content, mimetype='image/png')
-    except: return "Not Found", 404
+        r = HTTP.get(f"{IMAGE_BASE_URL}{item_id}.png", timeout=(2, 5))
+        r.raise_for_status()
+        if len(IMAGE_CACHE) >= MAX_IMAGE_CACHE_ITEMS:
+            IMAGE_CACHE.pop(next(iter(IMAGE_CACHE)))
+        IMAGE_CACHE[item_id] = r.content
+        return Response(r.content, mimetype='image/png', headers={"Cache-Control": "public, max-age=86400"})
+    except Exception:
+        return "Not Found", 404
 
 @app.route('/api/get_store', methods=['POST'])
 def get_store():
@@ -84,16 +117,17 @@ def get_store():
     if not region: return jsonify({"success": False, "message": "Invalid JWT!"}), 400
 
     if jwt_token not in STORE_CACHE:
-        wallet = get_wallet_data(jwt_token, login_token, region)
+        wallet_future = EXECUTOR.submit(get_wallet_data, jwt_token, login_token, region)
         req_pb = GetGiftStoreDetails_pb2.CSGetGiftStoreDetailsReq(store_id=1)
         headers = {"Authorization": f"Bearer {jwt_token}", "X-GA": "v1 1", "ReleaseVersion": "OB53", "Content-Type": "application/octet-stream", "User-Agent": USER_AGENT}
         
         try:
-            r = requests.post(f"{get_server_url(region)}/GetGiftStoreDetails", data=encrypt_payload(req_pb.SerializeToString()), headers=headers, verify=False, timeout=15)
+            r = HTTP.post(f"{get_server_url(region)}/GetGiftStoreDetails", data=encrypt_payload(req_pb.SerializeToString()), headers=headers, verify=False, timeout=(3, 12))
             if r.status_code == 200:
                 res_pb = GetGiftStoreDetails_pb2.CSGetGiftStoreDetailsRes()
                 res_pb.ParseFromString(r.content)
                 res_dict = MessageToDict(res_pb, preserving_proto_field_name=True, always_print_fields_with_no_presence=True)
+                wallet = wallet_result_or_default(wallet_future)
                 
                 all_items, categories = [], set()
                 for item in res_dict.get('items', []):
@@ -148,7 +182,7 @@ def send_gift():
     headers = {"Authorization": f"Bearer {jwt}", "X-GA": "v1 1", "ReleaseVersion": "OB53", "Content-Type": "application/octet-stream", "User-Agent": USER_AGENT}
     
     try:
-        r = requests.post(f"{get_server_url(region)}/SendGift", data=encrypt_payload(req.SerializeToString()), headers=headers, verify=False, timeout=15)
+        r = HTTP.post(f"{get_server_url(region)}/SendGift", data=encrypt_payload(req.SerializeToString()), headers=headers, verify=False, timeout=(3, 12))
         if r.status_code == 200:
             if jwt in STORE_CACHE: del STORE_CACHE[jwt] # Clear cache to update wallet/sent
             return jsonify({"success": True, "message": f"Gift sent to {uid} successfully!"})
@@ -159,4 +193,4 @@ def send_gift():
     except Exception as e: return jsonify({"success": False, "message": str(e)})
 
 if __name__ == '__main__':
-    app.run(port=8080)
+    app.run(port=8080, threaded=True)
